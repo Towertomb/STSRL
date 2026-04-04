@@ -1,0 +1,20 @@
+# STS2 RL 训练依赖
+
+# 核心
+gymnasium>=0.29.0
+numpy>=1.24.0
+requests>=2.31.0
+
+# 强化学习
+stable-baselines3>=2.3.0
+torch>=2.0.0
+
+# 工具
+tensorboard>=2.15.0
+matplotlib>=3.7.0
+pyautogui>=0.9.54
+opencv-python>=4.8.0
+pillow>=10.0.0
+# 可选：用于更高级的训练
+# sb3-contrib>=2.0.0  # 包含更多 RL 算法
+# wandb>=0.16.0       # 实验跟踪
