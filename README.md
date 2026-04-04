@@ -1,10 +1,10 @@
-# 🎮 STS2 RL - 杀戮尖塔 2 强化学习试验
+# STS2 RL - 杀戮尖塔 2 强化学习试验
 
 使用 PPO 算法训练 AI 自动玩《杀戮尖塔 2》(Slay the Spire 2)。
 
 ---
 
-## 📁 项目结构
+## 项目结构
 
 ```
 D:\STSRL\
@@ -30,7 +30,7 @@ D:\STSRL\
 
 ---
 
-## 🚀 快速开始
+## 快速开始
 
 ### 1️⃣ 安装依赖
 
@@ -59,7 +59,7 @@ python train_ppo.py --total-timesteps 1000000
 
 ---
 
-## 🤖 核心功能
+## 核心功能
 
 ### ✅ PPO 训练
 
@@ -82,7 +82,7 @@ python train_ppo.py --total-timesteps 1000000
 
 ---
 
-## 📈 训练监控
+## 训练监控
 
 使用 TensorBoard 查看训练指标：
 
@@ -98,7 +98,7 @@ tensorboard --logdir ./logs
 
 ---
 
-## ⚙️ 配置选项
+## 配置选项
 
 ### 训练参数
 
@@ -123,7 +123,7 @@ auto_restart = AutoRestarter(
 
 ---
 
-## 🛠️ 工具脚本
+## 工具脚本
 
 | 脚本 | 功能 |
 |------|------|
@@ -135,7 +135,7 @@ auto_restart = AutoRestarter(
 
 
 
-## ⚠️ 注意事项
+## 注意事项
 
 1. **游戏必须运行** - 训练前确保 STS2 已启动且 mod 已启用
 2. **窗口位置固定** - 避免移动游戏窗口（影响图像识别）
@@ -144,7 +144,7 @@ auto_restart = AutoRestarter(
 
 ---
 
-## 📚 相关资源
+## 相关资源
 
 - [STS2MCP Mod](https://github.com/kunology/STS2MCP) - 游戏 API mod
 - [Stable Baselines3 文档](https://stable-baselines3.readthedocs.io/)
@@ -152,7 +152,7 @@ auto_restart = AutoRestarter(
 
 ---
 
-## 🎯 训练目标
+## 训练目标 (还没成功训练出来)
 
 让模型学会：
 - ✅ 合理出牌（而非只结束回合）
@@ -163,7 +163,7 @@ auto_restart = AutoRestarter(
 
 ---
 
-## 未来计划
+## 计划
 
 - 优化观测空间，增加维度 （敌人id，手牌id...）
 - 优化模型动作输出，考虑更多情况 ）
