@@ -156,10 +156,6 @@ class STS2Env(gym.Env):
             else:
                 return ("advance_dialogue", 0, None)
         
-        # 卡牌包选择
-        elif state_type == 'bundle_select':
-            return ("bundle_select", action % 2, None)
-        
         # 卡牌选择（升级/移除/转化）
         elif state_type == 'card_select':
             # 在 card_select 状态下，0-9 选择卡牌，10+ 确认
@@ -393,14 +389,6 @@ class STS2Env(gym.Env):
                     result = self.client.event_advance_dialogue()
                 info['action_result'] = result
                 time.sleep(0.3)
-            
-            elif state_type == 'bundle_select':
-                try:
-                    result = self.client.bundle_select(param)
-                    info['action_result'] = result
-                except:
-                    pass
-                time.sleep(0.5)
             
             # ==================== 卡牌选择（升级/移除/转化） ====================
             elif state_type == 'card_select':

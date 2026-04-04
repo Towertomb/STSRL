@@ -452,28 +452,6 @@ class STS2Client:
         """
         return self._post({"action": "claim_treasure_relic", "index": relic_index})
     
-    # ==================== 卡牌包选择 API ====================
-    # 适用状态：bundle_select
-    
-    def bundle_select(self, bundle_index: int) -> Dict[str, Any]:
-        """
-        【卡牌包选择】选择卡牌包
-        
-        用于开局选择初始卡牌包，或其他卡牌包选择场景。
-        
-        Args:
-            bundle_index: 卡牌包索引（0-based）
-        
-        Returns:
-            操作结果
-        
-        示例:
-            # 选择第一个卡包
-            client.bundle_select(bundle_index=0)
-        """
-        return self._post({"action": "bundle_select", "index": bundle_index})
-
-
 # ==================== 多人模式 API ====================
 
 class STS2MultiplayerClient(STS2Client):

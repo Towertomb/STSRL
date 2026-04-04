@@ -18,11 +18,11 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 from stable_baselines3.common.monitor import Monitor
 import gymnasium as gym
 
-# 添加项目根目录到 Python 路径
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-# 导入自定义环境（使用修复版）
 from env.sts2_env import STS2Env as STS2Env
+from scripts.auto_restart import AutoRestarter
+
+# 创建全局自动重开实例
+auto_restart = AutoRestarter(check_interval=2.0, confidence=0.9)
 
 
 def make_env(log_dir: str, rank: int = 0) -> gym.Env:
@@ -129,6 +129,10 @@ def train(
         save_vecnormalize=True,
     )
     
+    # ============ 启动自动重开 ============
+    auto_restart.start()
+    # ====================================
+    
     # 开始训练
     print("\n🚀 开始训练...\n")
     
@@ -149,6 +153,11 @@ def train(
         interrupted_path = os.path.join(current_save_dir, "ppo_sts2_interrupted")
         model.save(interrupted_path)
         print(f"💾 已保存中断时的模型：{interrupted_path}")
+    
+    finally:
+        # ============ 停止自动重开 ============
+        auto_restart.stop()
+        # ====================================
     
     env.close()
     return model
