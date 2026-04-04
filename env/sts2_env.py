@@ -151,8 +151,15 @@ class STS2Env(gym.Env):
         
         # 事件
         elif state_type == 'event':
+            options = state.get('options', [])
+
+            if options[2]["title"] == "卷轴箱":
+                num_options = 2
+            else:
+                num_options = len(options) if options else 3
+
             if action < 20:
-                return ("event_option", action % 3, None)
+                return ("event_option", action % num_options, None)
             else:
                 return ("advance_dialogue", 0, None)
         
