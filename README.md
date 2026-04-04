@@ -8,9 +8,7 @@
 
 ```
 D:\STSRL\
-├── train_ppo.py              # PPO 训练脚本（带自动重开）
-├── play_auto.py              # 自动游玩脚本（规则基策略）
-├── check_state.py            # 状态检查工具
+├── train_ppo.py              # PPO 训练脚本
 ├── scripts/
 │   ├── auto_restart.py       # 死亡自动重开模块
 │   ├── clicker.py            # 图像识别点击器
