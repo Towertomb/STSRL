@@ -42,12 +42,53 @@ class STS2Env(gym.Env):
         self.last_hand_size = None
         
         # ==================== 观测空间 ====================
-        # 玩家状态 (5 维) + 手牌 (10×5=50 维) + 敌人 (10×4=40 维) + 药水 (3×1=3 维) = 98 维
-        player_dim = 5
-        hand_dim = max_hand_size * 5  # 卡牌 ID + 类型 + 费用 + 价值 + 可否出
-        enemy_dim = max_enemies * 4   # 敌人 ID + HP 比例 + 攻击意图 + Debuff 数
+        # 状态类型 (1 维) + 玩家 (15 维) + 手牌/卡牌选择 (211 维) + 敌人/事件 (150 维) + 药水 (6 维) = 383 维
+        # card_select 状态：screen_type(1 维) + 35 张牌×6 维=211 维
+        state_type_dim = 1            # 状态类型编码
+        player_base_dim = 5           # HP 比例 + 能量 + 格挡 + 金币 + 楼层
+        player_status_dim = 5 * 2     # 最多 5 个 status，每个 2 维 (status ID + 类型)
+        player_dim = player_base_dim + player_status_dim
+        self.max_cards = 35           # 最大卡牌数量（card_select 状态）
+        card_select_dim = 1 + self.max_cards * 6  # card_select: screen_type(1 维) + 35 张牌×6 维=211 维
+        enemy_dim = max_enemies * 15  # 敌人：10 个 × 15 维
+        event_base_dim = 3            # 事件 ID + is_ancient + in_dialogue
+        event_option_dim = 5 * 5      # 最多 5 个选项，每个 5 维 (index+desc 数 +is_locked+is_proceed+was_chosen)
+        event_dim = event_base_dim + event_option_dim  # 28 维
         potion_dim = 6                # 最多 6 瓶药水，每瓶 1 维（药水 ID）
-        obs_dim = player_dim + hand_dim + enemy_dim + potion_dim
+        obs_dim = state_type_dim + player_dim + card_select_dim + max(enemy_dim, event_dim) + potion_dim  # 383 维
+        
+        self.max_desc_number = 50     # 描述数字最大归一化值
+        self.max_event_id = 56        # events.json 最大 ID
+        
+        # card_select screen_type 编码
+        self.card_select_type_map = {
+            'upgrade': 1,
+            'select': 2,
+            'transform': 3,
+            'unknown': 0
+        }
+        
+        # 状态类型编码
+        self.state_type_map = {
+            'menu': 0,
+            'unknown': 1,
+            'monster': 2,
+            'elite': 3,
+            'boss': 4,
+            'hand_select': 5,
+            'rewards': 6,
+            'card_reward': 7,
+            'map': 8,
+            'event': 9,
+            'rest_site': 10,
+            'shop': 11,
+            'treasure': 12,
+            'card_select': 13,
+            'bundle_select': 14,
+            'relic_select': 15,
+            'crystal_sphere': 16,
+            'overlay': 17
+        }
         
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -60,27 +101,41 @@ class STS2Env(gym.Env):
         self.card_db = self._load_card_db()
         self.monster_db = self._load_monster_db()
         self.potion_db = self._load_potion_db()
+        self.status_db = self._load_status_db()
+        self.event_db = self._load_event_db()
+        
+        # Status 类型编码
+        self.status_type_map = {
+            'Buff': 1,
+            'Debuff': 2,
+            'Unknown': 0
+        }
         
         # ==================== 动作空间 (修复) ====================
         # 使用 Discrete 而非 MultiDiscrete
         # 0-9: 出牌，10-19: 用药，20: 结束回合，21: 跳过
         self.action_space = spaces.Discrete(22)
         
-        self.card_values = {
-            "Strike": 1.5,
-            "Defend": 1.2,
-            "Bash": 3.0,
-        }
-        
         # 归一化最大值
         self.max_energy = 5
         self.max_block = 50
         self.max_gold = 100
         self.max_floor = 60
-        self.max_intent = 50
+        self.max_intent_damage = 50  # 攻击意图最大伤害
         self.max_card_id = 577  # card.json 最大 ID
         self.max_monster_id = 107  # monsters.json 最大 ID
         self.max_potion_id = 63  # potions.json 最大 ID
+        self.max_status_id = 259  # status.json 最大 ID
+        
+        # 意图类型编码
+        self.intent_type_map = {
+            'Attack': 1,
+            'Defend': 2,
+            'Buff': 3,
+            'Debuff': 4,
+            'Sleep': 5,
+            'Unknown': 0
+        }
         
         # 日志列表
         self.event_log = []
@@ -122,6 +177,39 @@ class STS2Env(gym.Env):
         except:
             return {}
     
+    def _load_status_db(self) -> Dict[str, int]:
+        """加载 status 数据库，建立名称到 ID 的映射"""
+        import json
+        import os
+        db_path = os.path.join(os.path.dirname(__file__), '..', 'database', 'status.json')
+        try:
+            with open(db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # status.json 格式：{"0": "名称 1", "1": "名称 2", ...}
+            # 反转映射：名称 -> ID
+            return {name: int(id) for id, name in data.items()}
+        except:
+            return {}
+    
+    def _load_event_db(self) -> Dict[str, int]:
+        """加载 event 数据库，建立名称到 ID 的映射"""
+        import json
+        import os
+        db_path = os.path.join(os.path.dirname(__file__), '..', 'database', 'events.json')
+        try:
+            with open(db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # events.json 格式：{"0": "名称 1", "1": "名称 2", ...}
+            # 反转映射：名称 -> ID
+            return {name: int(id) for id, name in data.items()}
+        except:
+            return {}
+    
+    def _get_event_id(self, event_name: str) -> float:
+        """获取事件 ID 并归一化"""
+        event_id = self.event_db.get(event_name, 0)
+        return event_id / self.max_event_id
+    
     def _get_card_id(self, card_name: str) -> float:
         """获取卡牌 ID 并归一化"""
         card_id = self.card_db.get(card_name, 0)
@@ -136,6 +224,15 @@ class STS2Env(gym.Env):
         """获取药水 ID 并归一化"""
         potion_id = self.potion_db.get(potion_name, 0)
         return potion_id / self.max_potion_id
+    
+    def _get_status_id(self, status_name: str) -> float:
+        """获取 status ID 并归一化"""
+        status_id = self.status_db.get(status_name, 0)
+        return status_id / self.max_status_id
+    
+    def _get_status_type(self, status_type: str) -> float:
+        """获取 status 类型编码 (Buff=1, Debuff=2)"""
+        return self.status_type_map.get(status_type, 0)
     
     def log_event(self, msg: str):
         """记录事件日志"""
@@ -593,9 +690,15 @@ class STS2Env(gym.Env):
         """将游戏状态转换为观测向量"""
         obs = []
         
-        # 玩家状态 (player 在顶层)
+        # ==================== 状态类型 (1 维) ====================
+        state_type = state.get('state_type', 'unknown')
+        state_type_code = self.state_type_map.get(state_type, 1)  # 默认 unknown=1
+        obs.append(state_type_code / 17.0)  # 归一化 (÷17，最大状态码)
+        
+        # 玩家数据 (所有状态都有)
         player = state.get('player', {})
         
+        # ==================== 玩家基础维度 (5 维) ====================
         hp = player.get('hp', 0)
         max_hp = player.get('max_hp', 1)
         obs.append(hp / max(max_hp, 1))                          # HP 比例
@@ -604,37 +707,130 @@ class STS2Env(gym.Env):
         obs.append(player.get('gold', 0) / self.max_gold)        # 金币归一化 (÷100)
         obs.append(state.get('run', {}).get('floor', 0) / self.max_floor)  # 楼层归一化 (÷60)
         
-        # 手牌 (每张牌 5 维：卡牌 ID + 类型 + 费用 + 价值 + 可否出)
-        hand = player.get('hand', [])
-        for i in range(self.max_hand_size):
-            if i < len(hand):
-                card = hand[i]
-                card_id_norm = self._get_card_id(card.get('name', ''))  # 卡牌 ID 归一化
-                type_enc = {'Attack': 1, 'Skill': 2, 'Power': 3}.get(card.get('type', ''), 0)
-                cost = card.get('cost', 0)
-                if cost == 'X': cost = 0
-                try:
-                    cost = int(cost)
-                except:
-                    cost = 0
-                value = self._estimate_card_value(card)
-                can_play = 1 if card.get('can_play', False) else 0
-                obs.extend([card_id_norm, type_enc, cost, value, can_play])
+        # ==================== 玩家 Status 维度 (10 维) ====================
+        player_status_list = player.get('status', [])[:5]  # 只取前 5 个
+        for j in range(5):
+            if j < len(player_status_list):
+                status = player_status_list[j]
+                status_name = status.get('name', '')
+                status_type = status.get('type', 'Unknown')
+                obs.append(self._get_status_id(status_name))      # status ID 归一化
+                obs.append(self._get_status_type(status_type))    # 类型编码
             else:
-                obs.extend([0, 0, 0, 0, 0])
+                obs.extend([0, 0])  # 空槽位填充 0
         
-        # 敌人状态 (每个敌人 4 维：敌人 ID + HP 比例 + 攻击意图 + Debuff 数)
-        enemies = state.get('battle', {}).get('enemies', [])
-        for i in range(self.max_enemies):
-            if i < len(enemies):
-                enemy = enemies[i]
-                monster_id_norm = self._get_monster_id(enemy.get('name', ''))  # 敌人 ID 归一化
-                obs.append(monster_id_norm)
-                obs.append(enemy.get('hp', 0) / max(enemy.get('max_hp', 1), 1))  # HP 比例
-                obs.append(self._get_enemy_intent(enemy) / self.max_intent)      # 攻击意图归一化 (÷50)
-                obs.append(len(enemy.get('debuffs', [])))                        # Debuff 数量
+        # ==================== 手牌/可选卡牌 (最多 211 维) ====================
+        # card_select 状态：screen_type(1 维) + 35 张牌×6 维=211 维
+        # 其他状态：screen_type(1 维) + 10 张手牌×6 维 + 25 张空槽×6 维=211 维
+        if state_type == 'card_select':
+            # screen_type 编码 (1 维)
+            screen_type = state.get('card_select', {}).get('screen_type', 'unknown')
+            screen_type_code = self.card_select_type_map.get(screen_type, 0)
+            obs.append(screen_type_code / 3.0)  # 归一化 (÷3)
+            
+            # 卡牌选择：读取 card_select.cards (最多 35 张)
+            cards = state.get('card_select', {}).get('cards', [])
+            for i in range(self.max_cards):
+                if i < len(cards):
+                    card = cards[i]
+                    card_id_norm = self._get_card_id(card.get('name', ''))  # 卡牌 ID 归一化
+                    type_enc = {'Attack': 1, 'Skill': 2, 'Power': 3}.get(card.get('type', ''), 0)
+                    cost = card.get('cost', 0)
+                    if cost == 'X': cost = 0
+                    try:
+                        cost = int(cost)
+                    except:
+                        cost = 0
+                    desc_number = self._extract_desc_number(card.get('description', ''))
+                    can_play = 1  # card_select 状态下卡牌总是可选
+                    is_upgraded = 1 if card.get('is_upgraded', False) else 0
+                    obs.extend([card_id_norm, type_enc, cost, desc_number, can_play, is_upgraded])
+                else:
+                    obs.extend([0, 0, 0, 0, 0, 0])
+        else:
+            # 填充 screen_type 为 0 (非 card_select 状态)
+            obs.append(0)
+            
+            # 根据状态类型选择卡牌来源
+            cards = []
+            if state_type == 'card_reward':
+                # 卡牌奖励：读取 card_reward.cards
+                cards = state.get('card_reward', {}).get('cards', [])
             else:
-                obs.extend([0, 0, 0, 0])
+                # 战斗状态：读取 player.hand
+                cards = player.get('hand', [])
+            
+            for i in range(self.max_cards):
+                if i < len(cards):
+                    card = cards[i]
+                    card_id_norm = self._get_card_id(card.get('name', ''))  # 卡牌 ID 归一化
+                    type_enc = {'Attack': 1, 'Skill': 2, 'Power': 3}.get(card.get('type', ''), 0)
+                    cost = card.get('cost', 0)
+                    if cost == 'X': cost = 0
+                    try:
+                        cost = int(cost)
+                    except:
+                        cost = 0
+                    desc_number = self._extract_desc_number(card.get('description', ''))
+                    can_play = 1 if card.get('can_play', True) else 0
+                    is_upgraded = 1 if card.get('is_upgraded', False) else 0
+                    obs.extend([card_id_norm, type_enc, cost, desc_number, can_play, is_upgraded])
+                else:
+                    obs.extend([0, 0, 0, 0, 0, 0])
+        
+        # ==================== 敌人/事件状态 (150 维) ====================
+        # 事件状态时：用事件信息替代敌人 (28 维：基础 3 维 + 5 个选项×5 维)
+        if state_type == 'event':
+            # 事件基础维度 (3 维)
+            event_data = state.get('event', {})
+            event_name = event_data.get('event_name', '')
+            obs.append(self._get_event_id(event_name))              # 事件 ID 归一化
+            obs.append(1 if event_data.get('is_ancient', False) else 0)  # is_ancient
+            obs.append(1 if event_data.get('in_dialogue', False) else 0) # in_dialogue
+            
+            # 事件选项维度 (最多 5 个，每个 5 维)
+            options = event_data.get('options', [])[:5]
+            for j in range(5):
+                if j < len(options):
+                    opt = options[j]
+                    obs.append(opt.get('index', 0) / 10.0)              # 选项索引归一化
+                    obs.append(self._extract_desc_number(opt.get('description', '')))  # 描述数字
+                    obs.append(1 if opt.get('is_locked', False) else 0)  # is_locked
+                    obs.append(1 if opt.get('is_proceed', False) else 0) # is_proceed
+                    obs.append(1 if opt.get('was_chosen', False) else 0) # was_chosen
+                else:
+                    obs.extend([0, 0, 0, 0, 0])  # 空槽填充
+            
+            # 填充剩余维度到 150 维 (150 - 28 = 122 个 0)
+            obs.extend([0] * (150 - 28))
+        else:
+            # 敌人状态 (每个敌人 15 维：基础 5 维 + 5 个 status×2 维)
+            enemies = state.get('battle', {}).get('enemies', [])
+            for i in range(self.max_enemies):
+                if i < len(enemies):
+                    enemy = enemies[i]
+                    # 基础维度
+                    monster_id_norm = self._get_monster_id(enemy.get('name', ''))  # 敌人 ID 归一化
+                    obs.append(monster_id_norm)
+                    obs.append(enemy.get('hp', 0) / max(enemy.get('max_hp', 1), 1))  # HP 比例
+                    intent_type, intent_damage = self._get_enemy_intent(enemy)
+                    obs.append(intent_type / 5.0)           # 意图类型归一化 (÷5)
+                    obs.append(intent_damage / self.max_intent_damage)  # 攻击数值归一化 (÷50)
+                    obs.append(min(len(enemy.get('status', [])), 5))  # status 数量 (最多 5 个)
+                    
+                    # Status 维度 (最多 5 个，每个 2 维)
+                    status_list = enemy.get('status', [])[:5]
+                    for j in range(5):
+                        if j < len(status_list):
+                            status = status_list[j]
+                            status_name = status.get('name', '')
+                            status_type = status.get('type', 'Unknown')
+                            obs.append(self._get_status_id(status_name))
+                            obs.append(self._get_status_type(status_type))
+                        else:
+                            obs.extend([0, 0])
+                else:
+                    obs.extend([0] * 15)
         
         # 药水状态 (最多 3 瓶，每瓶 1 维：药水 ID)
         potions = player.get('potions', [])
@@ -648,24 +844,104 @@ class STS2Env(gym.Env):
         
         return np.array(obs, dtype=np.float32)
     
-    def _estimate_card_value(self, card: Dict) -> float:
-        name = card.get('name', '')
-        base = self.card_values.get(name, 1.0)
-        desc = card.get('description', '')
-        if '造成' in desc: base += 1.0
-        if '格挡' in desc: base += 0.8
-        if '抽' in desc: base += 1.5
-        return base
+    def _extract_desc_number(self, description: str) -> float:
+        """
+        从卡牌描述中提取数字并归一化 (÷50)
+        
+        提取规则：
+        - 提取描述中第一个数字
+        - 如"造成 6 点伤害" → 6
+        - 如"获得 12 点格挡" → 12
+        - 无数字 → 0
+        """
+        import re
+        if not description:
+            return 0.0
+        
+        # 匹配第一个连续数字
+        match = re.search(r'\d+', description)
+        if match:
+            number = int(match.group())
+            return number / self.max_desc_number
+        
+        return 0.0
     
-    def _get_enemy_intent(self, enemy: Dict) -> float:
-        total = 0
-        for intent in enemy.get('intents', []):
-            if intent.get('type') == 'Attack':
-                try:
-                    total += int(intent.get('label', 0))
-                except:
-                    pass
-        return total
+    def _get_enemy_intent(self, enemy: Dict) -> Tuple[float, float]:
+        """
+        解析敌人意图，返回 (意图类型编码，攻击数值)
+        
+        处理 label 格式：
+        - "11" → 11
+        - "2×4" → 2*4=8
+        - 无值或非 Attack → 0
+        """
+        intents = enemy.get('intents', [])
+        if not intents:
+            return (0.0, 0.0)
+        
+        # 取第一个意图（通常敌人只有一个意图）
+        intent = intents[0]
+        intent_type = intent.get('type', 'Unknown')
+        type_code = self.intent_type_map.get(intent_type, 0)
+        
+        # 只有 Attack 类型才计算伤害
+        if intent_type != 'Attack':
+            return (type_code, 0.0)
+        
+        # 解析 label 计算伤害
+        label = intent.get('label', '0')
+        damage = self._parse_intent_label(label)
+        
+        return (type_code, float(damage))
+    
+    def _parse_intent_label(self, label: str) -> int:
+        """
+        解析意图 label 字符串，计算总伤害
+        
+        支持格式：
+        - "11" → 11
+        - "2×4" 或 "2*4" → 8
+        - "1-3" → 2 (取平均)
+        """
+        if not label:
+            return 0
+        
+        # 处理乘法格式 "2×4" 或 "2*4"
+        if '×' in label:
+            parts = label.split('×')
+            try:
+                result = 1
+                for p in parts:
+                    result *= int(p.strip())
+                return result
+            except:
+                return 0
+        
+        if '*' in label:
+            parts = label.split('*')
+            try:
+                result = 1
+                for p in parts:
+                    result *= int(p.strip())
+                return result
+            except:
+                return 0
+        
+        # 处理范围格式 "1-3"
+        if '-' in label:
+            parts = label.split('-')
+            try:
+                low = int(parts[0].strip())
+                high = int(parts[1].strip())
+                return (low + high) // 2  # 取平均值
+            except:
+                return 0
+        
+        # 普通数字
+        try:
+            return int(label)
+        except:
+            return 0
     
     def _get_player_hp(self, state: Dict) -> Optional[int]:
         player = state.get('player', {})
