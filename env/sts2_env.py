@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""
-STS2 Gymnasium 环境包装器 - 修复版
-
-修复了动作空间问题，使用 Discrete 而非 MultiDiscrete。
-"""
-
 import gymnasium as gym
 from gymnasium import spaces
 import numpy as np
@@ -16,7 +9,6 @@ from env.sts2_api import STS2Client
 
 class STS2Env(gym.Env):
     """
-    STS2 强化学习环境 - 修复版
     
     使用 Discrete 动作空间，将动作编码为单一整数：
     - 0-9: 出牌 0-9
@@ -50,10 +42,12 @@ class STS2Env(gym.Env):
         self.last_hand_size = None
         
         # ==================== 观测空间 ====================
+        # 玩家状态 (5 维) + 手牌 (10×5=50 维) + 敌人 (10×4=40 维) + 药水 (3×1=3 维) = 98 维
         player_dim = 5
-        hand_dim = max_hand_size * 4
-        enemy_dim = max_enemies * 3
-        obs_dim = player_dim + hand_dim + enemy_dim + 10
+        hand_dim = max_hand_size * 5  # 卡牌 ID + 类型 + 费用 + 价值 + 可否出
+        enemy_dim = max_enemies * 4   # 敌人 ID + HP 比例 + 攻击意图 + Debuff 数
+        potion_dim = 6                # 最多 6 瓶药水，每瓶 1 维（药水 ID）
+        obs_dim = player_dim + hand_dim + enemy_dim + potion_dim
         
         self.observation_space = spaces.Box(
             low=-np.inf,
@@ -61,6 +55,11 @@ class STS2Env(gym.Env):
             shape=(obs_dim,),
             dtype=np.float32
         )
+        
+        # 加载数据库编码
+        self.card_db = self._load_card_db()
+        self.monster_db = self._load_monster_db()
+        self.potion_db = self._load_potion_db()
         
         # ==================== 动作空间 (修复) ====================
         # 使用 Discrete 而非 MultiDiscrete
@@ -73,8 +72,70 @@ class STS2Env(gym.Env):
             "Bash": 3.0,
         }
         
+        # 归一化最大值
+        self.max_energy = 5
+        self.max_block = 50
+        self.max_gold = 100
+        self.max_floor = 60
+        self.max_intent = 50
+        self.max_card_id = 577  # card.json 最大 ID
+        self.max_monster_id = 107  # monsters.json 最大 ID
+        self.max_potion_id = 63  # potions.json 最大 ID
+        
         # 日志列表
         self.event_log = []
+    
+    def _load_card_db(self) -> Dict[str, int]:
+        """加载卡牌数据库，建立名称到 ID 的映射"""
+        import json
+        import os
+        db_path = os.path.join(os.path.dirname(__file__), '..', 'database', 'card.json')
+        try:
+            with open(db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # 反转映射：名称 -> ID
+            return {name: int(id) for id, name in data.items()}
+        except:
+            return {}
+    
+    def _load_monster_db(self) -> Dict[str, int]:
+        """加载怪物数据库，建立名称到 ID 的映射"""
+        import json
+        import os
+        db_path = os.path.join(os.path.dirname(__file__), '..', 'database', 'monsters.json')
+        try:
+            with open(db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return {name: int(id) for id, name in data.items()}
+        except:
+            return {}
+    
+    def _load_potion_db(self) -> Dict[str, int]:
+        """加载药水数据库，建立名称到 ID 的映射"""
+        import json
+        import os
+        db_path = os.path.join(os.path.dirname(__file__), '..', 'database', 'potions.json')
+        try:
+            with open(db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return {name: int(id) for id, name in data.items()}
+        except:
+            return {}
+    
+    def _get_card_id(self, card_name: str) -> float:
+        """获取卡牌 ID 并归一化"""
+        card_id = self.card_db.get(card_name, 0)
+        return card_id / self.max_card_id
+    
+    def _get_monster_id(self, monster_name: str) -> float:
+        """获取怪物 ID 并归一化"""
+        monster_id = self.monster_db.get(monster_name, 0)
+        return monster_id / self.max_monster_id
+    
+    def _get_potion_id(self, potion_name: str) -> float:
+        """获取药水 ID 并归一化"""
+        potion_id = self.potion_db.get(potion_name, 0)
+        return potion_id / self.max_potion_id
     
     def log_event(self, msg: str):
         """记录事件日志"""
@@ -537,17 +598,18 @@ class STS2Env(gym.Env):
         
         hp = player.get('hp', 0)
         max_hp = player.get('max_hp', 1)
-        obs.append(hp / max(max_hp, 1))
-        obs.append(player.get('energy', 0))
-        obs.append(player.get('block', 0))
-        obs.append(player.get('gold', 0))
-        obs.append(state.get('run', {}).get('floor', 0))
+        obs.append(hp / max(max_hp, 1))                          # HP 比例
+        obs.append(player.get('energy', 0) / self.max_energy)    # 能量归一化 (÷5)
+        obs.append(player.get('block', 0) / self.max_block)      # 格挡归一化 (÷50)
+        obs.append(player.get('gold', 0) / self.max_gold)        # 金币归一化 (÷100)
+        obs.append(state.get('run', {}).get('floor', 0) / self.max_floor)  # 楼层归一化 (÷60)
         
-        # 手牌
+        # 手牌 (每张牌 5 维：卡牌 ID + 类型 + 费用 + 价值 + 可否出)
         hand = player.get('hand', [])
         for i in range(self.max_hand_size):
             if i < len(hand):
                 card = hand[i]
+                card_id_norm = self._get_card_id(card.get('name', ''))  # 卡牌 ID 归一化
                 type_enc = {'Attack': 1, 'Skill': 2, 'Power': 3}.get(card.get('type', ''), 0)
                 cost = card.get('cost', 0)
                 if cost == 'X': cost = 0
@@ -557,23 +619,32 @@ class STS2Env(gym.Env):
                     cost = 0
                 value = self._estimate_card_value(card)
                 can_play = 1 if card.get('can_play', False) else 0
-                obs.extend([type_enc, cost, value, can_play])
+                obs.extend([card_id_norm, type_enc, cost, value, can_play])
             else:
-                obs.extend([0, 0, 0, 0])
+                obs.extend([0, 0, 0, 0, 0])
         
-        # 敌人状态
+        # 敌人状态 (每个敌人 4 维：敌人 ID + HP 比例 + 攻击意图 + Debuff 数)
         enemies = state.get('battle', {}).get('enemies', [])
         for i in range(self.max_enemies):
             if i < len(enemies):
                 enemy = enemies[i]
-                obs.append(enemy.get('hp', 0) / max(enemy.get('max_hp', 1), 1))
-                obs.append(self._get_enemy_intent(enemy))
-                obs.append(len(enemy.get('debuffs', [])))
+                monster_id_norm = self._get_monster_id(enemy.get('name', ''))  # 敌人 ID 归一化
+                obs.append(monster_id_norm)
+                obs.append(enemy.get('hp', 0) / max(enemy.get('max_hp', 1), 1))  # HP 比例
+                obs.append(self._get_enemy_intent(enemy) / self.max_intent)      # 攻击意图归一化 (÷50)
+                obs.append(len(enemy.get('debuffs', [])))                        # Debuff 数量
             else:
-                obs.extend([0, 0, 0])
+                obs.extend([0, 0, 0, 0])
         
-        # 预留
-        obs.extend([0] * 10)
+        # 药水状态 (最多 3 瓶，每瓶 1 维：药水 ID)
+        potions = player.get('potions', [])
+        for i in range(6):
+            if i < len(potions):
+                potion = potions[i]
+                potion_id_norm = self._get_potion_id(potion.get('name', ''))  # 药水 ID 归一化
+                obs.append(potion_id_norm)
+            else:
+                obs.append(0)
         
         return np.array(obs, dtype=np.float32)
     
@@ -677,7 +748,7 @@ gym.register(
 
 if __name__ == "__main__":
     print("测试修复版环境...")
-    env = STS2EnvFixed()
+    env = STS2Env()
     
     obs, info = env.reset()
     print(f"观测形状：{obs.shape}")
