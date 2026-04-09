@@ -117,62 +117,77 @@ class AutoRestarter:
         event = state.get("event", {})
         return event.get("event_id") == "NEOW"
     
-    def _click_ui(self, image_name: str, step_name: str) -> bool:
+    def _click_ui(self, image_name: str, step_name: str, max_attempts: int = 3) -> bool:
         """
-        点击 UI 图像的辅助函数
+        点击 UI 图像的辅助函数（带重试）
         
         Args:
             image_name: 图像文件名（如 "ensue.png"）
             step_name: 步骤描述
+            max_attempts: 最大尝试次数
         
         Returns:
             是否成功点击
         """
         image_path = os.path.join(UI_IMAGE_DIR, image_name)
-        print(f"\n📌 点击'{step_name}' ({image_name})...")
-        result = click_image(image_path, confidence=self.confidence, timeout=10.0)
-        if result:
-            print("✅ 点击成功")
-        else:
-            print("⚠️ 点击失败")
-        time.sleep(1.0)
-        return result
+        
+        for attempt in range(max_attempts):
+            print(f"\n📌 点击'{step_name}' ({image_name})... (尝试 {attempt + 1}/{max_attempts})")
+            result = click_image(image_path, confidence=self.confidence, timeout=15.0)
+            if result:
+                print("✅ 点击成功")
+                time.sleep(1.0)
+                return True
+            print(f"⚠️ 尝试 {attempt + 1}/{max_attempts} 失败，等待重试...")
+            time.sleep(2.0)
+        
+        print(f"❌ 点击'{step_name}'失败（已尝试{max_attempts}次）")
+        return False
     
     def execute_restart_flow(self):
         """
         执行完整的重开流程
         
         流程:
-        1. 点击"继续" (ensue.png)
-        2. 点击"主菜单" (main_manu.png)
-        3. 点击"单人模式" (single_mode.png)
-        4. 点击"标准模式" (standard_mode.png)
-        5. 点击"签到/开始" (check_in.png)
-        6. 等待涅奥事件出现
+        1. 等待死亡界面完全显示
+        2. 点击"继续" (ensue.png)
+        3. 点击"主菜单" (main_manu.png)
+        4. 点击"单人模式" (single_mode.png)
+        5. 点击"标准模式" (standard_mode.png)
+        6. 点击"签到/开始" (check_in.png)
+        7. 等待涅奥事件出现
         """
         print("\n" + "="*60)
         print("🔄 检测到死亡，开始自动重开流程")
         print("="*60)
         
-        # 步骤 1: 点击"继续"
-        self._click_ui("ensue.png", "继续")
+        # 等待死亡界面完全显示（死亡动画、结算等）
+        print("\n⏳ 等待死亡界面完全显示...")
+        time.sleep(3.0)
+        
+        # 步骤 1: 点击"继续"（最多尝试 5 次）
+        if not self._click_ui("ensue.png", "继续", max_attempts=5):
+            print("⚠️ '继续'点击失败，尝试按空格键...")
+            import pyautogui
+            pyautogui.press('space')
+            time.sleep(2.0)
         
         # 步骤 2: 点击"主菜单"
-        self._click_ui("main_manu.png", "主菜单")
+        self._click_ui("main_manu.png", "主菜单", max_attempts=3)
         
         # 步骤 3: 点击"单人模式"
-        self._click_ui("single_mode.png", "单人模式")
+        self._click_ui("single_mode.png", "单人模式", max_attempts=3)
         
         # 步骤 4: 点击"标准模式"
-        self._click_ui("standard_mode.png", "标准模式")
+        self._click_ui("standard_mode.png", "标准模式", max_attempts=3)
         
         # 步骤 5: 点击"签到/开始游戏"
-        self._click_ui("check_in.png", "开始游戏")
+        self._click_ui("check_in.png", "开始游戏", max_attempts=3)
         
         # 步骤 6: 等待涅奥事件
         print("\n⏳ 等待涅奥事件出现...")
         wait_start = time.time()
-        while time.time() - wait_start < 30.0:  # 最多等 30 秒
+        while time.time() - wait_start < 45.0:  # 最多等 45 秒
             state = self.get_game_state()
             if state and self.is_neow_event(state):
                 print("✅ 涅奥事件已出现，重开流程完成！")

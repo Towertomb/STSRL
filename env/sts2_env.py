@@ -3,6 +3,7 @@ from gymnasium import spaces
 import numpy as np
 import requests
 import time
+import json
 from typing import Dict, Any, Optional, Tuple, List
 from env.sts2_api import STS2Client
 
@@ -42,29 +43,42 @@ class STS2Env(gym.Env):
         self.last_hand_size = None
         
         # ==================== 观测空间 ====================
-        # 状态类型 (1 维) + 玩家 (15 维) + 手牌/卡牌选择 (211 维) + 敌人/事件 (150 维) + 药水 (6 维) = 383 维
-        # card_select 状态：screen_type(1 维) + 35 张牌×6 维=211 维
+        # 状态类型 (1 维) + 玩家 (15 维) + 手牌/卡牌选择/商店 (211 维) + 敌人/事件 (170 维) + 药水 (6 维) = 403 维
+        # 敌人维度：10 个 × 17 维 (基础 7 维：ID+HP+2 个意图×2 维+status 数 + 5 个 status×2 维)
         state_type_dim = 1            # 状态类型编码
         player_base_dim = 5           # HP 比例 + 能量 + 格挡 + 金币 + 楼层
         player_status_dim = 5 * 2     # 最多 5 个 status，每个 2 维 (status ID + 类型)
         player_dim = player_base_dim + player_status_dim
-        self.max_cards = 35           # 最大卡牌数量（card_select 状态）
+        self.max_cards = 35           # 最大卡牌数量（card_select/shop 状态）
         card_select_dim = 1 + self.max_cards * 6  # card_select: screen_type(1 维) + 35 张牌×6 维=211 维
-        enemy_dim = max_enemies * 15  # 敌人：10 个 × 15 维
+        shop_dim = 1 + self.max_cards * 6  # shop: screen_type(1 维) + 35 个商品×6 维=211 维
+        enemy_base_dim = 7            # 敌人 ID + HP + 意图 1(类型 + 数值) + 意图 2(类型 + 数值) + status 数
+        enemy_status_dim = 5 * 2      # 最多 5 个 status，每个 2 维
+        enemy_dim = max_enemies * (enemy_base_dim + enemy_status_dim)  # 10 × 17 = 170 维
         event_base_dim = 3            # 事件 ID + is_ancient + in_dialogue
         event_option_dim = 5 * 5      # 最多 5 个选项，每个 5 维 (index+desc 数 +is_locked+is_proceed+was_chosen)
         event_dim = event_base_dim + event_option_dim  # 28 维
         potion_dim = 6                # 最多 6 瓶药水，每瓶 1 维（药水 ID）
-        obs_dim = state_type_dim + player_dim + card_select_dim + max(enemy_dim, event_dim) + potion_dim  # 383 维
+        obs_dim = state_type_dim + player_dim + max(card_select_dim, shop_dim) + max(enemy_dim, event_dim) + potion_dim  # 403 维
         
         self.max_desc_number = 50     # 描述数字最大归一化值
         self.max_event_id = 56        # events.json 最大 ID
+        self.max_relic_id = 200       # relics.json 最大 ID（预估）
         
         # card_select screen_type 编码
         self.card_select_type_map = {
             'upgrade': 1,
             'select': 2,
             'transform': 3,
+            'unknown': 0
+        }
+        
+        # shop 商品类型编码
+        self.shop_item_type_map = {
+            'card': 1,
+            'relic': 2,
+            'potion': 3,
+            'card_removal': 4,
             'unknown': 0
         }
         
@@ -103,6 +117,7 @@ class STS2Env(gym.Env):
         self.potion_db = self._load_potion_db()
         self.status_db = self._load_status_db()
         self.event_db = self._load_event_db()
+        self.relic_db = self._load_relic_db()
         
         # Status 类型编码
         self.status_type_map = {
@@ -205,10 +220,29 @@ class STS2Env(gym.Env):
         except:
             return {}
     
+    def _load_relic_db(self) -> Dict[str, int]:
+        """加载 relic 数据库，建立名称到 ID 的映射"""
+        import json
+        import os
+        db_path = os.path.join(os.path.dirname(__file__), '..', 'database', 'relics.json')
+        try:
+            with open(db_path, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            # relics.json 格式：{"0": "名称 1", "1": "名称 2", ...}
+            # 反转映射：名称 -> ID
+            return {name: int(id) for id, name in data.items()}
+        except:
+            return {}
+    
     def _get_event_id(self, event_name: str) -> float:
         """获取事件 ID 并归一化"""
         event_id = self.event_db.get(event_name, 0)
         return event_id / self.max_event_id
+    
+    def _get_relic_id(self, relic_name: str) -> float:
+        """获取遗物 ID 并归一化"""
+        relic_id = self.relic_db.get(relic_name, 0)
+        return relic_id / self.max_relic_id
     
     def _get_card_id(self, card_name: str) -> float:
         """获取卡牌 ID 并归一化"""
@@ -309,9 +343,12 @@ class STS2Env(gym.Env):
         
         # 事件
         elif state_type == 'event':
-            options = state.get('options', [])
-
-            if options[2]["title"] == "卷轴箱":
+            # 从 event 对象中获取 options
+            event_data = state.get('event', {})
+            options = event_data.get('options', [])
+            
+            # 检查是否有至少 3 个选项，并且第 3 个选项是"卷轴箱"
+            if len(options) >= 3 and options[2].get("title") == "卷轴箱":
                 num_options = 2
             else:
                 num_options = len(options) if options else 3
@@ -321,7 +358,27 @@ class STS2Env(gym.Env):
             else:
                 return ("advance_dialogue", 0, None)
         
-        # 卡牌选择（升级/移除/转化）
+        # 战斗中手牌选择（升级/移除/转化）
+        elif state_type == 'hand_select':
+            hand_select = state.get('hand_select', {})
+            cards = hand_select.get('cards', [])
+            can_confirm = hand_select.get('can_confirm', False)
+            num_cards = len(cards)
+            
+            if action < 10:  # 0-9: 选择/取消选择牌
+                if action < num_cards:
+                    return ("combat_select_card", action, None)
+                else:
+                    return ("wait", 0, None)
+            elif action == 10:  # 10: 确认选择
+                if can_confirm:
+                    return ("combat_confirm_selection", 0, None)
+                else:
+                    return ("wait", 0, None)
+            else:  # 11+: 等待
+                return ("wait", 0, None)
+        
+        # 事件中卡牌选择（升级/移除/转化）
         elif state_type == 'card_select':
             # 在 card_select 状态下，0-9 选择卡牌，10+ 确认
             if action < 10:
@@ -424,6 +481,19 @@ class STS2Env(gym.Env):
                     info['action_result'] = result
                     time.sleep(0.3)
                 # wait: 什么也不做
+            
+            elif state_type == 'hand_select':
+                # 战斗中手牌选择（升级/移除/转化）
+                if action_type == "combat_select_card":
+                    result = self.client.combat_select_card(param)
+                    info['action_result'] = result
+                    self.log_event(f"选择手牌：{param}")
+                elif action_type == "combat_confirm_selection":
+                    result = self.client.combat_confirm_selection()
+                    info['action_result'] = result
+                    self.log_event("确认手牌选择")
+                # wait: 等待
+                time.sleep(0.5)
             
             elif state_type in ['combat_rewards', 'rewards']:
                 # 检查是否有奖励可领取
@@ -617,6 +687,9 @@ class STS2Env(gym.Env):
             
         except Exception as e:
             print(f"环境 step 错误：{e}")
+            import traceback
+            traceback.print_exc()
+            print(f"[DEBUG] state_type: {state.get('state_type', 'unknown')}")
             obs = self.observation_space.sample()
             reward = -1.0
             info['error'] = str(e)
@@ -689,158 +762,204 @@ class STS2Env(gym.Env):
     def _get_observation(self, state: Dict) -> np.ndarray:
         """将游戏状态转换为观测向量"""
         obs = []
+        state_type = 'unknown'  # 初始化用于 debug
         
-        # ==================== 状态类型 (1 维) ====================
-        state_type = state.get('state_type', 'unknown')
-        state_type_code = self.state_type_map.get(state_type, 1)  # 默认 unknown=1
-        obs.append(state_type_code / 17.0)  # 归一化 (÷17，最大状态码)
-        
-        # 玩家数据 (所有状态都有)
-        player = state.get('player', {})
-        
-        # ==================== 玩家基础维度 (5 维) ====================
-        hp = player.get('hp', 0)
-        max_hp = player.get('max_hp', 1)
-        obs.append(hp / max(max_hp, 1))                          # HP 比例
-        obs.append(player.get('energy', 0) / self.max_energy)    # 能量归一化 (÷5)
-        obs.append(player.get('block', 0) / self.max_block)      # 格挡归一化 (÷50)
-        obs.append(player.get('gold', 0) / self.max_gold)        # 金币归一化 (÷100)
-        obs.append(state.get('run', {}).get('floor', 0) / self.max_floor)  # 楼层归一化 (÷60)
-        
-        # ==================== 玩家 Status 维度 (10 维) ====================
-        player_status_list = player.get('status', [])[:5]  # 只取前 5 个
-        for j in range(5):
-            if j < len(player_status_list):
-                status = player_status_list[j]
-                status_name = status.get('name', '')
-                status_type = status.get('type', 'Unknown')
-                obs.append(self._get_status_id(status_name))      # status ID 归一化
-                obs.append(self._get_status_type(status_type))    # 类型编码
-            else:
-                obs.extend([0, 0])  # 空槽位填充 0
-        
-        # ==================== 手牌/可选卡牌 (最多 211 维) ====================
-        # card_select 状态：screen_type(1 维) + 35 张牌×6 维=211 维
-        # 其他状态：screen_type(1 维) + 10 张手牌×6 维 + 25 张空槽×6 维=211 维
-        if state_type == 'card_select':
-            # screen_type 编码 (1 维)
-            screen_type = state.get('card_select', {}).get('screen_type', 'unknown')
-            screen_type_code = self.card_select_type_map.get(screen_type, 0)
-            obs.append(screen_type_code / 3.0)  # 归一化 (÷3)
+        try:
+            # ==================== 状态类型 (1 维) ====================
+            state_type = state.get('state_type', 'unknown')
+            state_type_code = self.state_type_map.get(state_type, 1)  # 默认 unknown=1
+            obs.append(state_type_code / 17.0)  # 归一化 (÷17，最大状态码)
             
-            # 卡牌选择：读取 card_select.cards (最多 35 张)
-            cards = state.get('card_select', {}).get('cards', [])
-            for i in range(self.max_cards):
-                if i < len(cards):
-                    card = cards[i]
-                    card_id_norm = self._get_card_id(card.get('name', ''))  # 卡牌 ID 归一化
-                    type_enc = {'Attack': 1, 'Skill': 2, 'Power': 3}.get(card.get('type', ''), 0)
-                    cost = card.get('cost', 0)
-                    if cost == 'X': cost = 0
-                    try:
-                        cost = int(cost)
-                    except:
-                        cost = 0
-                    desc_number = self._extract_desc_number(card.get('description', ''))
-                    can_play = 1  # card_select 状态下卡牌总是可选
-                    is_upgraded = 1 if card.get('is_upgraded', False) else 0
-                    obs.extend([card_id_norm, type_enc, cost, desc_number, can_play, is_upgraded])
-                else:
-                    obs.extend([0, 0, 0, 0, 0, 0])
-        else:
-            # 填充 screen_type 为 0 (非 card_select 状态)
-            obs.append(0)
-            
-            # 根据状态类型选择卡牌来源
-            cards = []
-            if state_type == 'card_reward':
-                # 卡牌奖励：读取 card_reward.cards
-                cards = state.get('card_reward', {}).get('cards', [])
-            else:
-                # 战斗状态：读取 player.hand
-                cards = player.get('hand', [])
-            
-            for i in range(self.max_cards):
-                if i < len(cards):
-                    card = cards[i]
-                    card_id_norm = self._get_card_id(card.get('name', ''))  # 卡牌 ID 归一化
-                    type_enc = {'Attack': 1, 'Skill': 2, 'Power': 3}.get(card.get('type', ''), 0)
-                    cost = card.get('cost', 0)
-                    if cost == 'X': cost = 0
-                    try:
-                        cost = int(cost)
-                    except:
-                        cost = 0
-                    desc_number = self._extract_desc_number(card.get('description', ''))
-                    can_play = 1 if card.get('can_play', True) else 0
-                    is_upgraded = 1 if card.get('is_upgraded', False) else 0
-                    obs.extend([card_id_norm, type_enc, cost, desc_number, can_play, is_upgraded])
-                else:
-                    obs.extend([0, 0, 0, 0, 0, 0])
+            # 玩家数据 (所有状态都有)
+            player = state.get('player', {})
         
-        # ==================== 敌人/事件状态 (150 维) ====================
-        # 事件状态时：用事件信息替代敌人 (28 维：基础 3 维 + 5 个选项×5 维)
-        if state_type == 'event':
-            # 事件基础维度 (3 维)
-            event_data = state.get('event', {})
-            event_name = event_data.get('event_name', '')
-            obs.append(self._get_event_id(event_name))              # 事件 ID 归一化
-            obs.append(1 if event_data.get('is_ancient', False) else 0)  # is_ancient
-            obs.append(1 if event_data.get('in_dialogue', False) else 0) # in_dialogue
+            # ==================== 玩家基础维度 (5 维) ====================
+            hp = player.get('hp', 0)
+            max_hp = player.get('max_hp', 1)
+            obs.append(hp / max(max_hp, 1))                          # HP 比例
+            obs.append(player.get('energy', 0) / self.max_energy)    # 能量归一化 (÷5)
+            obs.append(player.get('block', 0) / self.max_block)      # 格挡归一化 (÷50)
+            obs.append(player.get('gold', 0) / self.max_gold)        # 金币归一化 (÷100)
+            obs.append(state.get('run', {}).get('floor', 0) / self.max_floor)  # 楼层归一化 (÷60)
             
-            # 事件选项维度 (最多 5 个，每个 5 维)
-            options = event_data.get('options', [])[:5]
+            # ==================== 玩家 Status 维度 (10 维) ====================
+            player_status_list = player.get('status', [])[:5]  # 只取前 5 个
             for j in range(5):
-                if j < len(options):
-                    opt = options[j]
-                    obs.append(opt.get('index', 0) / 10.0)              # 选项索引归一化
-                    obs.append(self._extract_desc_number(opt.get('description', '')))  # 描述数字
-                    obs.append(1 if opt.get('is_locked', False) else 0)  # is_locked
-                    obs.append(1 if opt.get('is_proceed', False) else 0) # is_proceed
-                    obs.append(1 if opt.get('was_chosen', False) else 0) # was_chosen
+                if j < len(player_status_list):
+                    status = player_status_list[j]
+                    status_name = status.get('name', '')
+                    status_type = status.get('type', 'Unknown')
+                    obs.append(self._get_status_id(status_name))      # status ID 归一化
+                    obs.append(self._get_status_type(status_type))    # 类型编码
                 else:
-                    obs.extend([0, 0, 0, 0, 0])  # 空槽填充
+                    obs.extend([0, 0])  # 空槽位填充 0
             
-            # 填充剩余维度到 150 维 (150 - 28 = 122 个 0)
-            obs.extend([0] * (150 - 28))
-        else:
-            # 敌人状态 (每个敌人 15 维：基础 5 维 + 5 个 status×2 维)
-            enemies = state.get('battle', {}).get('enemies', [])
-            for i in range(self.max_enemies):
-                if i < len(enemies):
-                    enemy = enemies[i]
-                    # 基础维度
-                    monster_id_norm = self._get_monster_id(enemy.get('name', ''))  # 敌人 ID 归一化
-                    obs.append(monster_id_norm)
-                    obs.append(enemy.get('hp', 0) / max(enemy.get('max_hp', 1), 1))  # HP 比例
-                    intent_type, intent_damage = self._get_enemy_intent(enemy)
-                    obs.append(intent_type / 5.0)           # 意图类型归一化 (÷5)
-                    obs.append(intent_damage / self.max_intent_damage)  # 攻击数值归一化 (÷50)
-                    obs.append(min(len(enemy.get('status', [])), 5))  # status 数量 (最多 5 个)
-                    
-                    # Status 维度 (最多 5 个，每个 2 维)
-                    status_list = enemy.get('status', [])[:5]
-                    for j in range(5):
-                        if j < len(status_list):
-                            status = status_list[j]
-                            status_name = status.get('name', '')
-                            status_type = status.get('type', 'Unknown')
-                            obs.append(self._get_status_id(status_name))
-                            obs.append(self._get_status_type(status_type))
+            # ==================== 手牌/可选卡牌/商店 (最多 211 维) ====================
+            if state_type == 'card_select':
+                screen_type = state.get('card_select', {}).get('screen_type', 'unknown')
+                screen_type_code = self.card_select_type_map.get(screen_type, 0)
+                obs.append(screen_type_code / 3.0)
+                
+                cards = state.get('card_select', {}).get('cards', [])
+                for i in range(self.max_cards):
+                    if i < len(cards):
+                        card = cards[i]
+                        card_id_norm = self._get_card_id(card.get('name', ''))
+                        type_enc = {'Attack': 1, 'Skill': 2, 'Power': 3}.get(card.get('type', ''), 0)
+                        cost = card.get('cost', 0)
+                        if cost == 'X': cost = 0
+                        try:
+                            cost = int(cost)
+                        except:
+                            cost = 0
+                        desc_number = self._extract_desc_number(card.get('description', ''))
+                        can_play = 1
+                        is_upgraded = 1 if card.get('is_upgraded', False) else 0
+                        obs.extend([card_id_norm, type_enc, cost, desc_number, can_play, is_upgraded])
+                    else:
+                        obs.extend([0, 0, 0, 0, 0, 0])
+            
+            elif state_type == 'shop':
+                obs.append(0)
+                items = state.get('shop', {}).get('items', [])
+                for i in range(self.max_cards):
+                    if i < len(items):
+                        item = items[i]
+                        category = item.get('category', 'unknown')
+                        item_type = self.shop_item_type_map.get(category, 0)
+                        obs.append(item_type / 4.0)
+                        
+                        if category == 'card':
+                            item_id = self._get_card_id(item.get('card_name', ''))
+                        elif category == 'relic':
+                            item_id = self._get_relic_id(item.get('relic_name', ''))
+                        elif category == 'potion':
+                            item_id = self._get_potion_id(item.get('potion_name', ''))
                         else:
-                            obs.extend([0, 0])
-                else:
-                    obs.extend([0] * 15)
-        
-        # 药水状态 (最多 3 瓶，每瓶 1 维：药水 ID)
-        potions = player.get('potions', [])
-        for i in range(6):
-            if i < len(potions):
-                potion = potions[i]
-                potion_id_norm = self._get_potion_id(potion.get('name', ''))  # 药水 ID 归一化
-                obs.append(potion_id_norm)
+                            item_id = 0
+                        obs.append(item_id)
+                        obs.append(min(item.get('cost', 0) / 300.0, 1.0))
+                        
+                        if category == 'card':
+                            desc_number = self._extract_desc_number(item.get('card_description', ''))
+                        elif category == 'relic':
+                            desc_number = self._extract_desc_number(item.get('relic_description', ''))
+                        elif category == 'potion':
+                            desc_number = self._extract_desc_number(item.get('potion_description', ''))
+                        else:
+                            desc_number = 0
+                        obs.append(desc_number)
+                        obs.append(1 if item.get('can_afford', False) else 0)
+                        is_stocked = 1 if item.get('is_stocked', False) else 0
+                        on_sale = 1 if item.get('on_sale', False) else 0
+                        obs.append(is_stocked if not on_sale else 1)
+                    else:
+                        obs.extend([0, 0, 0, 0, 0, 0])
+            
             else:
                 obs.append(0)
+                cards = []
+                if state_type == 'card_reward':
+                    cards = state.get('card_reward', {}).get('cards', [])
+                elif state_type == 'hand_select':
+                    # 战斗中手牌选择：读取 hand_select.cards
+                    cards = state.get('hand_select', {}).get('cards', [])
+                else:
+                    cards = player.get('hand', [])
+                
+                for i in range(self.max_cards):
+                    if i < len(cards):
+                        card = cards[i]
+                        card_id_norm = self._get_card_id(card.get('name', ''))
+                        type_enc = {'Attack': 1, 'Skill': 2, 'Power': 3}.get(card.get('type', ''), 0)
+                        cost = card.get('cost', 0)
+                        if cost == 'X': cost = 0
+                        try:
+                            cost = int(cost)
+                        except:
+                            cost = 0
+                        desc_number = self._extract_desc_number(card.get('description', ''))
+                        can_play = 1 if card.get('can_play', True) else 0
+                        is_upgraded = 1 if card.get('is_upgraded', False) else 0
+                        obs.extend([card_id_norm, type_enc, cost, desc_number, can_play, is_upgraded])
+                    else:
+                        obs.extend([0, 0, 0, 0, 0, 0])
+            
+            # ==================== 敌人/事件状态 (170 维) ====================
+            if state_type == 'event':
+                event_data = state.get('event', {})
+                event_name = event_data.get('event_name', '')
+                obs.append(self._get_event_id(event_name))
+                obs.append(1 if event_data.get('is_ancient', False) else 0)
+                obs.append(1 if event_data.get('in_dialogue', False) else 0)
+                
+                # 检测是否有"卷轴箱"选项（通常是第 3 个），有的话只取前 2 个有效选项
+                raw_options = event_data.get('options', [])
+                if len(raw_options) >= 3 and raw_options[2].get("title") == "卷轴箱":
+                    options = raw_options[:2]  # 排除卷轴箱
+                else:
+                    options = raw_options[:5]
+                
+                # 编码选项 (固定 5 个槽位，不足的用 0 填充)
+                for j in range(5):
+                    if j < len(options):
+                        opt = options[j]
+                        obs.append(opt.get('index', 0) / 10.0)
+                        obs.append(self._extract_desc_number(opt.get('description', '')))
+                        obs.append(1 if opt.get('is_locked', False) else 0)
+                        obs.append(1 if opt.get('is_proceed', False) else 0)
+                        obs.append(1 if opt.get('was_chosen', False) else 0)
+                    else:
+                        obs.extend([0, 0, 0, 0, 0])
+                
+                # 固定填充到 170 维 (事件 28 维 + 敌人空槽 142 维)
+                obs.extend([0] * 142)
+            else:
+                enemies = state.get('battle', {}).get('enemies', [])
+                for i in range(self.max_enemies):
+                    if i < len(enemies):
+                        enemy = enemies[i]
+                        monster_id_norm = self._get_monster_id(enemy.get('name', ''))
+                        obs.append(monster_id_norm)
+                        obs.append(enemy.get('hp', 0) / max(enemy.get('max_hp', 1), 1))
+                        type1, damage1, type2, damage2 = self._get_enemy_intents(enemy)
+                        obs.append(type1 / 5.0)
+                        obs.append(damage1 / self.max_intent_damage)
+                        obs.append(type2 / 5.0)
+                        obs.append(damage2 / self.max_intent_damage)
+                        obs.append(min(len(enemy.get('status', [])), 5))
+                        
+                        status_list = enemy.get('status', [])[:5]
+                        for j in range(5):
+                            if j < len(status_list):
+                                status = status_list[j]
+                                status_name = status.get('name', '')
+                                status_type = status.get('type', 'Unknown')
+                                obs.append(self._get_status_id(status_name))
+                                obs.append(self._get_status_type(status_type))
+                            else:
+                                obs.extend([0, 0])
+                    else:
+                        obs.extend([0] * 17)
+            
+            # 药水状态 (6 维)
+            potions = player.get('potions', [])
+            for i in range(6):
+                if i < len(potions):
+                    potion = potions[i]
+                    potion_id_norm = self._get_potion_id(potion.get('name', ''))
+                    obs.append(potion_id_norm)
+                else:
+                    obs.append(0)
+        
+        except Exception as e:
+            print(f"\n[DEBUG] 观测编码错误：{e}")
+            import traceback
+            traceback.print_exc()
+            print(f"[DEBUG] state_type: {state_type}")
+            print(f"[DEBUG] obs 当前维度：{len(obs)}")
+            print(f"[DEBUG] state 内容：{json.dumps(state, indent=2, ensure_ascii=False)[:2000]}")
+            raise
         
         return np.array(obs, dtype=np.float32)
     
@@ -866,9 +985,11 @@ class STS2Env(gym.Env):
         
         return 0.0
     
-    def _get_enemy_intent(self, enemy: Dict) -> Tuple[float, float]:
+    def _get_enemy_intents(self, enemy: Dict) -> Tuple[float, float, float, float]:
         """
-        解析敌人意图，返回 (意图类型编码，攻击数值)
+        解析敌人意图，返回 (意图类型 1, 攻击数值 1, 意图类型 2, 攻击数值 2)
+        
+        支持最多 2 个意图，不足的用 0 填充
         
         处理 label 格式：
         - "11" → 11
@@ -876,23 +997,28 @@ class STS2Env(gym.Env):
         - 无值或非 Attack → 0
         """
         intents = enemy.get('intents', [])
-        if not intents:
-            return (0.0, 0.0)
         
-        # 取第一个意图（通常敌人只有一个意图）
-        intent = intents[0]
-        intent_type = intent.get('type', 'Unknown')
-        type_code = self.intent_type_map.get(intent_type, 0)
+        # 解析第一个意图
+        type1, damage1 = 0.0, 0.0
+        if len(intents) > 0:
+            intent = intents[0]
+            intent_type = intent.get('type', 'Unknown')
+            type1 = self.intent_type_map.get(intent_type, 0)
+            if intent_type == 'Attack':
+                label = intent.get('label', '0')
+                damage1 = float(self._parse_intent_label(label))
         
-        # 只有 Attack 类型才计算伤害
-        if intent_type != 'Attack':
-            return (type_code, 0.0)
+        # 解析第二个意图
+        type2, damage2 = 0.0, 0.0
+        if len(intents) > 1:
+            intent = intents[1]
+            intent_type = intent.get('type', 'Unknown')
+            type2 = self.intent_type_map.get(intent_type, 0)
+            if intent_type == 'Attack':
+                label = intent.get('label', '0')
+                damage2 = float(self._parse_intent_label(label))
         
-        # 解析 label 计算伤害
-        label = intent.get('label', '0')
-        damage = self._parse_intent_label(label)
-        
-        return (type_code, float(damage))
+        return (type1, damage1, type2, damage2)
     
     def _parse_intent_label(self, label: str) -> int:
         """
