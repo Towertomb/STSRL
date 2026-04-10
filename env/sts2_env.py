@@ -1026,8 +1026,7 @@ class STS2Env(gym.Env):
         
         支持格式：
         - "11" → 11
-        - "2×4" 或 "2*4" → 8
-        - "1-3" → 2 (取平均)
+        - "2×4" → 8
         """
         if not label:
             return 0
@@ -1040,26 +1039,6 @@ class STS2Env(gym.Env):
                 for p in parts:
                     result *= int(p.strip())
                 return result
-            except:
-                return 0
-        
-        if '*' in label:
-            parts = label.split('*')
-            try:
-                result = 1
-                for p in parts:
-                    result *= int(p.strip())
-                return result
-            except:
-                return 0
-        
-        # 处理范围格式 "1-3"
-        if '-' in label:
-            parts = label.split('-')
-            try:
-                low = int(parts[0].strip())
-                high = int(parts[1].strip())
-                return (low + high) // 2  # 取平均值
             except:
                 return 0
         
